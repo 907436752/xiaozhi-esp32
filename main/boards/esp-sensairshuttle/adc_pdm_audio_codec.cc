@@ -151,6 +151,7 @@ void AdcPdmAudioCodec::EnableInput(bool enable) {
     if (enable == input_enabled_) {
         return;
     }
+
     if (enable) {
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
@@ -160,10 +161,13 @@ void AdcPdmAudioCodec::EnableInput(bool enable) {
             .mclk_multiple = 0,
         };
         ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
+        AudioCodec::EnableInput(true);
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+        // ESP32-C5 + ADC continuous mode 下，运行时 close input_dev_
+        // 可能在 adc_continuous_stop() 里触发 FreeRTOS mutex 断言。
+        // 因此先保持 ADC 输入常开，避免周期性重启。
+        return;
     }
-    AudioCodec::EnableInput(enable);
 }
 
 void AdcPdmAudioCodec::EnableOutput(bool enable) {
