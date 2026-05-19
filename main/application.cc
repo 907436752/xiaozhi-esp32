@@ -16,6 +16,7 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include "smart_lamp/lamp_bridge.h"
 
 #define TAG "Application"
 
@@ -157,6 +158,7 @@ void Application::Initialize() {
 
     // Start network asynchronously
     board.StartNetwork();
+    SmartLampBridge::GetInstance().Start();
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);

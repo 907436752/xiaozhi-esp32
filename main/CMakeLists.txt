@@ -32,14 +32,16 @@ set(SOURCES "audio/audio_codec.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
+            "smart_lamp/lamp_bridge.cc"
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
+            
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "smart_lamp")
 
 # Add board common files
 list(APPEND SOURCES
@@ -1000,6 +1002,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        esp_wifi
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 
