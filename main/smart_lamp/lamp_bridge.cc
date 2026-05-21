@@ -96,7 +96,7 @@ void SmartLampBridge::AddBroadcastPeer()
 {
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, kBroadcastMac, 6);
-    peer.channel = SMART_LAMP_ESPNOW_CHANNEL;
+    peer.channel = 0;
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
 
@@ -256,6 +256,14 @@ void SmartLampBridge::CommandTask(void* arg)
     auto* self = static_cast<SmartLampBridge*>(arg);
 
     while (true) {
+        uint8_t primary = 0;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        esp_err_t ch_ret = esp_wifi_get_channel(&primary, &second);
+        if (ch_ret == ESP_OK) {
+            ESP_LOGI(TAG, "Current WiFi channel: %u", primary);
+        } else {
+            ESP_LOGW(TAG, "esp_wifi_get_channel failed: %s", esp_err_to_name(ch_ret));
+        }
         s3_status_packet_t status = {};
 
         if (self->GetLastStatus(&status, 3000)) {
