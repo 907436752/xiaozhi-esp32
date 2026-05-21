@@ -43,6 +43,209 @@ static const char* state_to_str(uint8_t state)
     }
 }
 
+enum {
+    CMD_MODE_IDLE = 0,
+    CMD_MODE_AUTO_LIGHT = 1,
+    CMD_MODE_ALARM = 2,
+};
+
+typedef struct {
+    uint8_t mode;
+    uint8_t brightness;
+    uint8_t blink;
+    const char* reason;
+} lamp_decision_t;
+
+static TickType_t s_last_presence_tick = 0;
+static bool s_prev_presence_recent = false;
+static TickType_t s_activity_window_start_tick = 0;
+static uint32_t s_night_activity_count = 0;
+
+static bool s_has_last_cmd = false;
+static uint8_t s_last_cmd_mode = CMD_MODE_IDLE;
+static uint8_t s_last_cmd_brightness = 0;
+static uint8_t s_last_cmd_blink = 0;
+static TickType_t s_last_cmd_send_tick = 0;
+
+static uint32_t elapsed_ms(TickType_t now, TickType_t then)
+{
+    return (uint32_t)((now - then) * portTICK_PERIOD_MS);
+}
+
+static float status_lux(const s3_status_packet_t& status)
+{
+    return status.lux_x10 / 10.0f;
+}
+
+static bool is_dark_scene(const s3_status_packet_t& status)
+{
+    return status.is_dark || status_lux(status) < 45.0f;
+}
+
+static int abs_int(int value)
+{
+    return value < 0 ? -value : value;
+}
+
+static uint8_t decide_presence_brightness(float lux)
+{
+    if (lux < 3.0f) {
+        return 35;
+    }
+    if (lux < 10.0f) {
+        return 45;
+    }
+    if (lux < 30.0f) {
+        return 55;
+    }
+    if (lux < 45.0f) {
+        return 30;
+    }
+    return 0;
+}
+
+static bool is_frequent_night_activity(TickType_t now)
+{
+    if (s_activity_window_start_tick == 0) {
+        return false;
+    }
+
+    if (elapsed_ms(now, s_activity_window_start_tick) > 30 * 60 * 1000) {
+        return false;
+    }
+
+    return s_night_activity_count >= 3;
+}
+
+static void update_activity_stats(const s3_status_packet_t& status, TickType_t now)
+{
+    bool presence = status.presence_recent != 0;
+    bool rising_presence = presence && !s_prev_presence_recent;
+
+    if (rising_presence && is_dark_scene(status)) {
+        if (s_activity_window_start_tick == 0 ||
+            elapsed_ms(now, s_activity_window_start_tick) > 30 * 60 * 1000) {
+            s_activity_window_start_tick = now;
+            s_night_activity_count = 0;
+        }
+
+        s_night_activity_count++;
+        ESP_LOGI(TAG, "Night activity count in current window: %lu",
+                 (unsigned long)s_night_activity_count);
+    }
+
+    if (s_activity_window_start_tick != 0 &&
+        elapsed_ms(now, s_activity_window_start_tick) > 30 * 60 * 1000) {
+        s_activity_window_start_tick = 0;
+        s_night_activity_count = 0;
+    }
+
+    if (presence) {
+        s_last_presence_tick = now;
+    }
+
+    s_prev_presence_recent = presence;
+}
+
+static lamp_decision_t decide_lamp_command(const s3_status_packet_t& status, TickType_t now)
+{
+    lamp_decision_t decision = {
+        .mode = CMD_MODE_IDLE,
+        .brightness = 0,
+        .blink = 0,
+        .reason = "standby",
+    };
+
+    float lux = status_lux(status);
+
+    if (status.sos_pressed || status.alarm) {
+        decision.mode = CMD_MODE_ALARM;
+        decision.brightness = 100;
+        decision.blink = 1;
+        decision.reason = "sos_alarm";
+        return decision;
+    }
+
+    if (status.presence_recent) {
+        uint8_t brightness = decide_presence_brightness(lux);
+
+        if (brightness > 0 || status.is_dark) {
+            decision.mode = CMD_MODE_AUTO_LIGHT;
+            decision.brightness = brightness > 0 ? brightness : 30;
+            decision.blink = 0;
+
+            if (is_frequent_night_activity(now)) {
+                decision.brightness = 15;
+                decision.reason = "presence_frequent_activity_soft_light";
+            } else {
+                decision.reason = "presence_dark_adaptive";
+            }
+
+            return decision;
+        }
+
+        decision.mode = CMD_MODE_IDLE;
+        decision.brightness = 0;
+        decision.blink = 0;
+        decision.reason = "presence_bright_no_light";
+        return decision;
+    }
+
+    if (s_last_presence_tick != 0) {
+        uint32_t away_ms = elapsed_ms(now, s_last_presence_tick);
+
+        if (away_ms < 20 * 1000) {
+            decision.mode = CMD_MODE_AUTO_LIGHT;
+            decision.brightness = 25;
+            decision.blink = 0;
+            decision.reason = "recent_leave_hold";
+            return decision;
+        }
+
+        if (away_ms < 60 * 1000) {
+            decision.mode = CMD_MODE_AUTO_LIGHT;
+            decision.brightness = 10;
+            decision.blink = 0;
+            decision.reason = "recent_leave_dim";
+            return decision;
+        }
+    }
+
+    if (is_frequent_night_activity(now) && is_dark_scene(status)) {
+        decision.mode = CMD_MODE_AUTO_LIGHT;
+        decision.brightness = 15;
+        decision.blink = 0;
+        decision.reason = "frequent_activity_soft_light";
+        return decision;
+    }
+
+    return decision;
+}
+
+static bool should_send_command(const lamp_decision_t& decision, TickType_t now)
+{
+    if (!s_has_last_cmd) {
+        return true;
+    }
+
+    if (decision.mode != s_last_cmd_mode ||
+        decision.blink != s_last_cmd_blink ||
+        abs_int((int)decision.brightness - (int)s_last_cmd_brightness) >= 5) {
+        return true;
+    }
+
+    return elapsed_ms(now, s_last_cmd_send_tick) >= 5000;
+}
+
+static void remember_sent_command(const lamp_decision_t& decision, TickType_t now)
+{
+    s_has_last_cmd = true;
+    s_last_cmd_mode = decision.mode;
+    s_last_cmd_brightness = decision.brightness;
+    s_last_cmd_blink = decision.blink;
+    s_last_cmd_send_tick = now;
+}
+
 void SmartLampBridge::Start()
 {
     if (started_) {
@@ -152,6 +355,8 @@ void SmartLampBridge::HandleStatusPacket(const s3_status_packet_t& packet)
     s_last_status = packet;
     s_last_status_tick = xTaskGetTickCount();
     s_has_status = true;
+
+    update_activity_stats(packet, s_last_status_tick);
 
     float lux = packet.lux_x10 / 10.0f;
 
@@ -267,8 +472,23 @@ void SmartLampBridge::CommandTask(void* arg)
         s3_status_packet_t status = {};
 
         if (self->GetLastStatus(&status, 3000)) {
+            TickType_t now = xTaskGetTickCount();
+            lamp_decision_t decision = decide_lamp_command(status, now);
+
+            if (should_send_command(decision, now)) {
+                self->SendCommand(decision.mode, decision.brightness, decision.blink);
+                remember_sent_command(decision, now);
+
+                ESP_LOGI(TAG,
+                        "Decision: reason=%s mode=%u brightness=%u blink=%u activity_count=%lu",
+                        decision.reason,
+                        decision.mode,
+                        decision.brightness,
+                        decision.blink,
+                        (unsigned long)s_night_activity_count);
+            }
+
             if (status.sos_pressed || status.alarm) {
-                self->SendCommand(2, 100, 1);
                 self->SendLargeDisplay(
                     LARGE_PAGE_ALERT,
                     100,
@@ -277,10 +497,6 @@ void SmartLampBridge::CommandTask(void* arg)
                     "Alarm mode active.",
                     "Lamp is blinking."
                 );
-            } else if (status.presence_recent && status.is_dark) {
-                self->SendCommand(1, 70, 0);
-            } else {
-                self->SendCommand(0, 0, 0);
             }
         } else {
             ESP_LOGW(TAG, "S3 offline or no status packet");
