@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
+#include <string>
+#include "mcp_server.h"
 
 #define TAG "SmartLampBridge"
 
@@ -66,6 +68,30 @@ static uint8_t s_last_cmd_mode = CMD_MODE_IDLE;
 static uint8_t s_last_cmd_brightness = 0;
 static uint8_t s_last_cmd_blink = 0;
 static TickType_t s_last_cmd_send_tick = 0;
+
+typedef enum {
+    VOICE_OVERRIDE_NONE = 0,
+    VOICE_OVERRIDE_OFFSET,
+    VOICE_OVERRIDE_FIXED,
+    VOICE_OVERRIDE_FORCE_OFF
+} voice_override_type_t;
+
+typedef struct {
+    voice_override_type_t type;
+    int offset;
+    uint8_t fixed_brightness;
+    TickType_t expire_tick;
+} voice_override_t;
+
+static voice_override_t s_voice_override = {
+    .type = VOICE_OVERRIDE_NONE,
+    .offset = 0,
+    .fixed_brightness = 0,
+    .expire_tick = 0,
+};
+
+#define VOICE_OVERRIDE_TTL_MS       (10 * 60 * 1000)
+#define VOICE_FORCE_OFF_TTL_MS      (5 * 60 * 1000)
 
 static uint32_t elapsed_ms(TickType_t now, TickType_t then)
 {
@@ -244,6 +270,75 @@ static void remember_sent_command(const lamp_decision_t& decision, TickType_t no
     s_last_cmd_brightness = decision.brightness;
     s_last_cmd_blink = decision.blink;
     s_last_cmd_send_tick = now;
+}
+
+static bool voice_override_valid(TickType_t now)
+{
+    if (s_voice_override.type == VOICE_OVERRIDE_NONE) {
+        return false;
+    }
+
+    if (s_voice_override.expire_tick != 0 &&
+        now >= s_voice_override.expire_tick) {
+        s_voice_override.type = VOICE_OVERRIDE_NONE;
+        s_voice_override.offset = 0;
+        s_voice_override.fixed_brightness = 0;
+        s_voice_override.expire_tick = 0;
+        ESP_LOGI(TAG, "Voice override expired");
+        return false;
+    }
+
+    return true;
+}
+
+static void apply_voice_override(lamp_decision_t& decision, TickType_t now)
+{
+    if (!voice_override_valid(now)) {
+        return;
+    }
+
+    // SOS / ALARM 永远不允许被普通语音覆盖
+    if (decision.mode == CMD_MODE_ALARM || decision.blink) {
+        return;
+    }
+
+    if (s_voice_override.type == VOICE_OVERRIDE_FORCE_OFF) {
+        decision.mode = CMD_MODE_IDLE;
+        decision.brightness = 0;
+        decision.blink = 0;
+        decision.reason = "voice_force_off";
+        return;
+    }
+
+    if (s_voice_override.type == VOICE_OVERRIDE_FIXED) {
+        decision.brightness = s_voice_override.fixed_brightness;
+        decision.mode = decision.brightness > 0 ? CMD_MODE_AUTO_LIGHT : CMD_MODE_IDLE;
+        decision.blink = 0;
+        decision.reason = "voice_fixed_brightness";
+        return;
+    }
+
+    if (s_voice_override.type == VOICE_OVERRIDE_OFFSET) {
+        int base = decision.brightness;
+
+        // 如果当前场景默认是关灯，但用户说“亮一点”，给一个可见的起始亮度
+        if (base == 0 && s_voice_override.offset > 0) {
+            base = 20;
+        }
+
+        int final_value = base + s_voice_override.offset;
+        if (final_value < 0) {
+            final_value = 0;
+        }
+        if (final_value > 100) {
+            final_value = 100;
+        }
+
+        decision.brightness = (uint8_t)final_value;
+        decision.mode = decision.brightness > 0 ? CMD_MODE_AUTO_LIGHT : CMD_MODE_IDLE;
+        decision.blink = 0;
+        decision.reason = "voice_offset_brightness";
+    }
 }
 
 void SmartLampBridge::Start()
@@ -474,6 +569,7 @@ void SmartLampBridge::CommandTask(void* arg)
         if (self->GetLastStatus(&status, 3000)) {
             TickType_t now = xTaskGetTickCount();
             lamp_decision_t decision = decide_lamp_command(status, now);
+            apply_voice_override(decision, now);
 
             if (should_send_command(decision, now)) {
                 self->SendCommand(decision.mode, decision.brightness, decision.blink);
@@ -504,4 +600,134 @@ void SmartLampBridge::CommandTask(void* arg)
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+}
+
+void SmartLampBridge::AdjustBrightnessByVoice(int delta)
+{
+    if (delta > 50) {
+        delta = 50;
+    }
+    if (delta < -50) {
+        delta = -50;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+
+    if (s_voice_override.type == VOICE_OVERRIDE_OFFSET) {
+        s_voice_override.offset += delta;
+    } else {
+        s_voice_override.offset = delta;
+    }
+
+    if (s_voice_override.offset > 60) {
+        s_voice_override.offset = 60;
+    }
+    if (s_voice_override.offset < -60) {
+        s_voice_override.offset = -60;
+    }
+
+    s_voice_override.type = VOICE_OVERRIDE_OFFSET;
+    s_voice_override.expire_tick = now + pdMS_TO_TICKS(VOICE_OVERRIDE_TTL_MS);
+
+    // 让下一轮立即发命令，不等5秒刷新
+    s_has_last_cmd = false;
+
+    ESP_LOGI(TAG, "Voice override: offset=%d", s_voice_override.offset);
+}
+
+void SmartLampBridge::SetBrightnessByVoice(uint8_t brightness)
+{
+    if (brightness > 100) {
+        brightness = 100;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+
+    s_voice_override.type = VOICE_OVERRIDE_FIXED;
+    s_voice_override.fixed_brightness = brightness;
+    s_voice_override.offset = 0;
+    s_voice_override.expire_tick = now + pdMS_TO_TICKS(VOICE_OVERRIDE_TTL_MS);
+
+    s_has_last_cmd = false;
+
+    ESP_LOGI(TAG, "Voice override: fixed brightness=%u", brightness);
+}
+
+void SmartLampBridge::TurnOffTemporarilyByVoice()
+{
+    TickType_t now = xTaskGetTickCount();
+
+    s_voice_override.type = VOICE_OVERRIDE_FORCE_OFF;
+    s_voice_override.offset = 0;
+    s_voice_override.fixed_brightness = 0;
+    s_voice_override.expire_tick = now + pdMS_TO_TICKS(VOICE_FORCE_OFF_TTL_MS);
+
+    s_has_last_cmd = false;
+
+    ESP_LOGI(TAG, "Voice override: force off temporarily");
+}
+
+void SmartLampBridge::ClearVoiceOverride()
+{
+    s_voice_override.type = VOICE_OVERRIDE_NONE;
+    s_voice_override.offset = 0;
+    s_voice_override.fixed_brightness = 0;
+    s_voice_override.expire_tick = 0;
+
+    s_has_last_cmd = false;
+
+    ESP_LOGI(TAG, "Voice override cleared, back to auto mode");
+}
+
+void SmartLampBridge::RegisterMcpTools()
+{
+    auto& mcp_server = McpServer::GetInstance();
+
+    mcp_server.AddTool(
+        "self.lamp.adjust_brightness",
+        "Temporarily adjust the smart care lamp brightness. Use positive delta to make it brighter, negative delta to make it dimmer. This does not cancel SOS alarm.",
+        PropertyList({
+            Property("delta", kPropertyTypeInteger, -50, 50)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int delta = properties["delta"].value<int>();
+            SmartLampBridge::GetInstance().AdjustBrightnessByVoice(delta);
+            return std::string("Brightness adjusted temporarily.");
+        }
+    );
+
+    mcp_server.AddTool(
+        "self.lamp.set_brightness",
+        "Temporarily set the smart care lamp brightness to a fixed percentage from 0 to 100. This does not cancel SOS alarm.",
+        PropertyList({
+            Property("brightness", kPropertyTypeInteger, 0, 100)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int brightness = properties["brightness"].value<int>();
+            SmartLampBridge::GetInstance().SetBrightnessByVoice((uint8_t)brightness);
+            return std::string("Brightness set temporarily.");
+        }
+    );
+
+    mcp_server.AddTool(
+        "self.lamp.turn_off_temporarily",
+        "Temporarily turn off the smart care lamp. It will return to automatic mode later. This does not cancel SOS alarm.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            SmartLampBridge::GetInstance().TurnOffTemporarilyByVoice();
+            return std::string("Lamp turned off temporarily.");
+        }
+    );
+
+    mcp_server.AddTool(
+        "self.lamp.auto_mode",
+        "Clear manual voice brightness override and return the lamp to automatic sensor-based care mode.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            SmartLampBridge::GetInstance().ClearVoiceOverride();
+            return std::string("Automatic care mode restored.");
+        }
+    );
+
+    ESP_LOGI(TAG, "Smart lamp MCP tools registered");
 }

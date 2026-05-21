@@ -15,6 +15,12 @@ public:
     bool GetLastStatus(s3_status_packet_t* out, uint32_t timeout_ms = 3000);
 
     void SendCommand(uint8_t mode, uint8_t brightness, uint8_t blink);
+    void RegisterMcpTools();
+
+    void AdjustBrightnessByVoice(int delta);
+    void SetBrightnessByVoice(uint8_t brightness);
+    void TurnOffTemporarilyByVoice();
+    void ClearVoiceOverride();
     void SendLargeDisplay(uint8_t page,
                           uint8_t level,
                           const char* title,
