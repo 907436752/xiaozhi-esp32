@@ -27,7 +27,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-
+#include "smart_lamp/env_sensor.h"
 #include "sdkconfig.h"
 
 constexpr char TAG[] = "ESP_SensairShuttle";
@@ -157,6 +157,42 @@ private:
     Cst816d* cst816d_;
     Display* display_ = nullptr;
     Button boot_button_;
+    Bme690EnvSensor* env_sensor_ = nullptr;
+
+    void ScanI2cBus()
+    {
+        ESP_LOGI(TAG, "Scanning I2C bus...");
+
+        vTaskDelay(pdMS_TO_TICKS(300));
+
+        for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+            esp_err_t ret = i2c_master_probe(
+                i2c_bus_,
+                addr,
+                pdMS_TO_TICKS(100)
+            );
+
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "I2C device found at 0x%02X", addr);
+            } else if (ret == ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TAG, "I2C timeout at 0x%02X, bus may be stuck", addr);
+                break;
+            }
+        }
+
+        ESP_LOGI(TAG, "I2C scan done");
+    }
+
+    void InitializeEnvSensor()
+    {
+        env_sensor_ = new Bme690EnvSensor(i2c_bus_, 0x77);
+
+        if (!env_sensor_->Start()) {
+            ESP_LOGW(TAG, "BME690 environment sensor not started");
+            delete env_sensor_;
+            env_sensor_ = nullptr;
+        }
+    }
 
     void InitializeI2c()
     {
@@ -283,6 +319,8 @@ private:
 public:
     EspSensairShuttle() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializeI2c();
+        ScanI2cBus();
+        InitializeEnvSensor();
         InitializeCst816dTouchPad();
         InitializeButtons();
         InitializeSpi();
