@@ -9,7 +9,8 @@
 #include "freertos/task.h"
 
 #include "esp_rom_sys.h"
-
+#include <math.h>
+#include <stdio.h>
 extern "C" {
 #include "bme68x.h"
 }
@@ -19,6 +20,211 @@ extern "C" {
 static struct bme68x_dev s_bme_dev = {};
 static env_sensor_data_t s_latest = {};
 static bool s_has_latest = false;
+
+static env_care_state_t s_latest_care = {};
+static bool s_has_latest_care = false;
+
+static const char* env_level_to_str(env_level_t level)
+{
+    switch (level) {
+        case ENV_LEVEL_NORMAL: return "normal";
+        case ENV_LEVEL_NOTICE: return "notice";
+        case ENV_LEVEL_WARNING: return "warning";
+        default: return "unknown";
+    }
+}
+
+static temp_state_t classify_temp(float t)
+{
+    if (t < 16.0f) {
+        return TEMP_VERY_COLD;
+    }
+    if (t < 18.0f) {
+        return TEMP_COLD;
+    }
+    if (t < 23.0f) {
+        return TEMP_COOL_COMFORT;
+    }
+    if (t <= 27.0f) {
+        return TEMP_COMFORT;
+    }
+    if (t < 30.0f) {
+        return TEMP_HOT;
+    }
+    return TEMP_VERY_HOT;
+}
+
+static humidity_state_t classify_humidity(float h)
+{
+    if (h < 25.0f) {
+        return HUM_VERY_DRY;
+    }
+    if (h < 30.0f) {
+        return HUM_DRY;
+    }
+    if (h < 45.0f) {
+        return HUM_COMFORT_DRY;
+    }
+    if (h <= 60.0f) {
+        return HUM_COMFORT;
+    }
+    if (h < 70.0f) {
+        return HUM_HUMID;
+    }
+    return HUM_VERY_HUMID;
+}
+
+static int clamp_int(int value, int min_value, int max_value)
+{
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static int calc_comfort_score(float temp_c, float humidity)
+{
+    int score = 100;
+
+    score -= (int)(fabsf(temp_c - 24.0f) * 4.0f);
+    score -= (int)(fabsf(humidity - 45.0f) * 1.0f);
+
+    return clamp_int(score, 0, 100);
+}
+
+static void set_care_text(env_care_state_t* out,
+                          env_level_t level,
+                          const char* title,
+                          const char* summary,
+                          const char* suggestion)
+{
+    out->level = level;
+    snprintf(out->title, sizeof(out->title), "%s", title);
+    snprintf(out->summary, sizeof(out->summary), "%s", summary);
+    snprintf(out->suggestion, sizeof(out->suggestion), "%s", suggestion);
+}
+
+static env_care_state_t evaluate_env_care(float temp_c, float humidity)
+{
+    env_care_state_t out = {};
+
+    out.temp_state = classify_temp(temp_c);
+    out.humidity_state = classify_humidity(humidity);
+    out.comfort_score = calc_comfort_score(temp_c, humidity);
+    out.valid = true;
+
+    if (temp_c >= 30.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_WARNING,
+            "High Temperature",
+            "Room temperature is too high.",
+            "Please ventilate or cool the room."
+        );
+        return out;
+    }
+
+    if (humidity >= 70.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_WARNING,
+            "High Humidity",
+            "Room humidity is too high.",
+            "Please ventilate or dehumidify."
+        );
+        return out;
+    }
+
+    if (temp_c < 18.0f && humidity < 30.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Cold & Dry",
+            "Room is cold and dry.",
+            "Keep warm and consider humidifying."
+        );
+        return out;
+    }
+
+    if (temp_c < 18.0f && humidity >= 60.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Cold & Humid",
+            "Room feels cold and damp.",
+            "Keep warm and ventilate properly."
+        );
+        return out;
+    }
+
+    if (temp_c > 27.0f && humidity < 30.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Hot & Dry",
+            "Room is warm and dry.",
+            "Ventilate and drink some water."
+        );
+        return out;
+    }
+
+    if (temp_c > 27.0f && humidity >= 60.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Hot & Humid",
+            "Room feels stuffy.",
+            "Ventilation or cooling is suggested."
+        );
+        return out;
+    }
+
+    if (humidity < 30.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Dry Air",
+            "Humidity is low.",
+            "Consider drinking water or humidifying."
+        );
+        return out;
+    }
+
+    if (temp_c < 18.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Low Temperature",
+            "Room is a little cold.",
+            "Please keep warm."
+        );
+        return out;
+    }
+
+    if (temp_c > 27.0f) {
+        set_care_text(
+            &out,
+            ENV_LEVEL_NOTICE,
+            "Warm Room",
+            "Room is a little warm.",
+            "Ventilation is suggested."
+        );
+        return out;
+    }
+
+    set_care_text(
+        &out,
+        ENV_LEVEL_NORMAL,
+        "Comfortable",
+        "Room environment is suitable.",
+        "Keep the current environment."
+    );
+
+    return out;
+}
 
 Bme690EnvSensor::Bme690EnvSensor(i2c_master_bus_handle_t bus, uint8_t addr)
     : bus_(bus), addr_(addr)
@@ -166,6 +372,9 @@ bool Bme690EnvSensor::ReadOnce(env_sensor_data_t* out)
     s_latest = result;
     s_has_latest = true;
 
+    s_latest_care = evaluate_env_care(result.temperature_c, result.humidity_percent);
+    s_has_latest_care = true;
+
     if (out != nullptr) {
         *out = result;
     }
@@ -183,6 +392,16 @@ bool Bme690EnvSensor::GetLatest(env_sensor_data_t* out)
     return true;
 }
 
+bool Bme690EnvSensor::GetLatestCareState(env_care_state_t* out)
+{
+    if (!s_has_latest_care || out == nullptr) {
+        return false;
+    }
+
+    *out = s_latest_care;
+    return true;
+}
+
 void Bme690EnvSensor::SensorTask(void* arg)
 {
     auto* self = static_cast<Bme690EnvSensor*>(arg);
@@ -191,6 +410,9 @@ void Bme690EnvSensor::SensorTask(void* arg)
         env_sensor_data_t data = {};
 
         if (self->ReadOnce(&data)) {
+            env_care_state_t care = {};
+            bool has_care = self->GetLatestCareState(&care);
+
             if (data.pressure_valid) {
                 ESP_LOGI(TAG,
                         "T=%.2f C, H=%.2f %%, P=%.2f hPa, Gas=%.0f ohm, gas_valid=%u",
@@ -206,6 +428,16 @@ void Bme690EnvSensor::SensorTask(void* arg)
                         data.humidity_percent,
                         data.gas_resistance_ohm,
                         data.gas_valid ? 1 : 0);
+            }
+
+            if (has_care) {
+                ESP_LOGI(TAG,
+                        "ENV: %s, score=%d, level=%s, summary=%s, tip=%s",
+                        care.title,
+                        care.comfort_score,
+                        env_level_to_str(care.level),
+                        care.summary,
+                        care.suggestion);
             }
         }
 
@@ -263,5 +495,39 @@ void Bme690EnvSensor::DelayUs(uint32_t period_us, void* intf_ptr)
         esp_rom_delay_us(period_us);
     } else {
         vTaskDelay(pdMS_TO_TICKS((period_us + 999) / 1000));
+    }
+}
+
+bool EnvSensorGetLatest(env_sensor_data_t* out)
+{
+    if (!s_has_latest || out == nullptr) {
+        return false;
+    }
+
+    *out = s_latest;
+    return true;
+}
+
+bool EnvSensorGetLatestCareState(env_care_state_t* out)
+{
+    if (!s_has_latest_care || out == nullptr) {
+        return false;
+    }
+
+    *out = s_latest_care;
+    return true;
+}
+
+const char* EnvLevelToString(env_level_t level)
+{
+    switch (level) {
+        case ENV_LEVEL_NORMAL:
+            return "normal";
+        case ENV_LEVEL_NOTICE:
+            return "notice";
+        case ENV_LEVEL_WARNING:
+            return "warning";
+        default:
+            return "unknown";
     }
 }

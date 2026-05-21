@@ -12,7 +12,7 @@
 #include "esp_wifi.h"
 #include <string>
 #include "mcp_server.h"
-
+#include "env_sensor.h"
 #define TAG "SmartLampBridge"
 
 static const uint8_t kBroadcastMac[6] = {
@@ -726,6 +726,52 @@ void SmartLampBridge::RegisterMcpTools()
         [](const PropertyList& properties) -> ReturnValue {
             SmartLampBridge::GetInstance().ClearVoiceOverride();
             return std::string("Automatic care mode restored.");
+        }
+    );
+
+    mcp_server.AddTool(
+        "self.lamp.get_environment",
+        "Get the latest indoor environment sensor data from the smart care lamp, including temperature, humidity, pressure availability, gas resistance and care suggestion.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            env_sensor_data_t env = {};
+            env_care_state_t care = {};
+
+            bool has_env = EnvSensorGetLatest(&env);
+            bool has_care = EnvSensorGetLatestCareState(&care);
+
+            cJSON* root = cJSON_CreateObject();
+
+            if (!has_env) {
+                cJSON_AddBoolToObject(root, "available", false);
+                cJSON_AddStringToObject(root, "message", "Environment sensor data is not available yet.");
+                return root;
+            }
+
+            cJSON_AddBoolToObject(root, "available", true);
+
+            cJSON_AddNumberToObject(root, "temperature_c", env.temperature_c);
+            cJSON_AddNumberToObject(root, "humidity_percent", env.humidity_percent);
+
+            cJSON_AddBoolToObject(root, "pressure_valid", env.pressure_valid);
+            if (env.pressure_valid) {
+                cJSON_AddNumberToObject(root, "pressure_hpa", env.pressure_hpa);
+            }
+
+            cJSON_AddBoolToObject(root, "gas_valid", env.gas_valid);
+            if (env.gas_valid) {
+                cJSON_AddNumberToObject(root, "gas_resistance_ohm", env.gas_resistance_ohm);
+            }
+
+            if (has_care) {
+                cJSON_AddStringToObject(root, "environment_title", care.title);
+                cJSON_AddStringToObject(root, "level", EnvLevelToString(care.level));
+                cJSON_AddNumberToObject(root, "comfort_score", care.comfort_score);
+                cJSON_AddStringToObject(root, "summary", care.summary);
+                cJSON_AddStringToObject(root, "suggestion", care.suggestion);
+            }
+
+            return root;
         }
     );
 
