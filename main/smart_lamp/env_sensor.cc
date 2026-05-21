@@ -94,8 +94,8 @@ bool Bme690EnvSensor::InitDevice()
 
     struct bme68x_heatr_conf heatr_conf = {};
     heatr_conf.enable = BME68X_ENABLE;
-    heatr_conf.heatr_temp = 300;
-    heatr_conf.heatr_dur = 100;
+    heatr_conf.heatr_temp = 0;
+    heatr_conf.heatr_dur = 0;
 
     rslt = bme68x_set_heatr_conf(BME68X_FORCED_MODE, &heatr_conf, &s_bme_dev);
     if (rslt != BME68X_OK) {
@@ -122,8 +122,8 @@ bool Bme690EnvSensor::ReadOnce(env_sensor_data_t* out)
 
     struct bme68x_heatr_conf heatr_conf = {};
     heatr_conf.enable = BME68X_ENABLE;
-    heatr_conf.heatr_temp = 300;
-    heatr_conf.heatr_dur = 100;
+    heatr_conf.heatr_temp = 0;
+    heatr_conf.heatr_dur = 0;
 
     int8_t rslt = bme68x_set_op_mode(BME68X_FORCED_MODE, &s_bme_dev);
     if (rslt != BME68X_OK) {
@@ -132,13 +132,14 @@ bool Bme690EnvSensor::ReadOnce(env_sensor_data_t* out)
     }
 
     uint32_t meas_dur_us = bme68x_get_meas_dur(BME68X_FORCED_MODE, &conf, &s_bme_dev);
-    uint32_t total_delay_us = meas_dur_us + heatr_conf.heatr_dur * 1000;
+    uint32_t total_delay_us = meas_dur_us + 1000;
     DelayUs(total_delay_us, this);
 
     struct bme68x_data data = {};
     uint8_t n_fields = 0;
 
     rslt = bme68x_get_data(BME68X_FORCED_MODE, &data, &n_fields, &s_bme_dev);
+    //ESP_LOGI(TAG, "bme status=0x%02X n_fields=%u", data.status, n_fields);
     if (rslt != BME68X_OK || n_fields == 0) {
         ESP_LOGW(TAG, "bme68x_get_data failed: rslt=%d n_fields=%u", rslt, n_fields);
         return false;
@@ -148,6 +149,16 @@ bool Bme690EnvSensor::ReadOnce(env_sensor_data_t* out)
     result.temperature_c = data.temperature;
     result.humidity_percent = data.humidity;
     result.pressure_hpa = data.pressure / 100.0f;
+    result.pressure_valid = true;
+
+    if (result.pressure_hpa < 850.0f || result.pressure_hpa > 1150.0f) {
+        ESP_LOGW(TAG, "Pressure out of range: raw=%.2f, hPa=%.2f",
+                (double)data.pressure,
+                (double)result.pressure_hpa);
+
+        result.pressure_hpa = 0.0f;
+        result.pressure_valid = false;
+    }
     result.gas_resistance_ohm = data.gas_resistance;
     result.gas_valid = (data.status & BME68X_GASM_VALID_MSK) != 0;
     result.valid = true;
@@ -180,13 +191,22 @@ void Bme690EnvSensor::SensorTask(void* arg)
         env_sensor_data_t data = {};
 
         if (self->ReadOnce(&data)) {
-            ESP_LOGI(TAG,
-                     "T=%.2f C, H=%.2f %%, P=%.2f hPa, Gas=%.0f ohm, gas_valid=%u",
-                     data.temperature_c,
-                     data.humidity_percent,
-                     data.pressure_hpa,
-                     data.gas_resistance_ohm,
-                     data.gas_valid ? 1 : 0);
+            if (data.pressure_valid) {
+                ESP_LOGI(TAG,
+                        "T=%.2f C, H=%.2f %%, P=%.2f hPa, Gas=%.0f ohm, gas_valid=%u",
+                        data.temperature_c,
+                        data.humidity_percent,
+                        data.pressure_hpa,
+                        data.gas_resistance_ohm,
+                        data.gas_valid ? 1 : 0);
+            } else {
+                ESP_LOGI(TAG,
+                        "T=%.2f C, H=%.2f %%, P=N/A, Gas=%.0f ohm, gas_valid=%u",
+                        data.temperature_c,
+                        data.humidity_percent,
+                        data.gas_resistance_ohm,
+                        data.gas_valid ? 1 : 0);
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(5000));

@@ -38,10 +38,11 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
-            
+            "smart_lamp/env_sensor.cc"
+            "smart_lamp/bme68x/bme68x.c"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "smart_lamp")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "smart_lamp" "smart_lamp/bme68x")
 
 # Add board common files
 list(APPEND SOURCES
@@ -1005,6 +1006,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_wifi
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
+target_compile_definitions(${COMPONENT_LIB} PRIVATE BME68X_USE_FPU)
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
 # If BOARD_NAME is empty, use BOARD_TYPE

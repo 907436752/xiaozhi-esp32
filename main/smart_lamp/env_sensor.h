@@ -8,9 +8,13 @@
 typedef struct {
     float temperature_c;
     float humidity_percent;
+
     float pressure_hpa;
+    bool pressure_valid;
+
     float gas_resistance_ohm;
     bool gas_valid;
+
     bool valid;
 } env_sensor_data_t;
 
