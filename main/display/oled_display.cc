@@ -10,6 +10,7 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <font_awesome.h>
+#include "smart_lamp/nurse_ui.h"
 
 #define TAG "OledDisplay"
 

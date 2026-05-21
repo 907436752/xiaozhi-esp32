@@ -15,6 +15,7 @@
 #include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
+#include "smart_lamp/nurse_ui.h"
 
 #define TAG "LcdDisplay"
 
@@ -838,13 +839,15 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, 0);
 
     emoji_label_ = lv_label_create(emoji_box_);
-    lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
-    lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
-    lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
 
     emoji_image_ = lv_img_create(emoji_box_);
     lv_obj_center(emoji_image_);
     lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+
+    NurseUiCreate(emoji_box_);
+    NurseUiSetState(NURSE_UI_IDLE);
+    NurseUiSetTip("Smart Care Lamp");
 
     /* Middle layer: preview_image_ - centered display */
     preview_image_ = lv_image_create(screen);
@@ -1035,6 +1038,15 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
     }
     DisplayLockGuard lock(this);
+    if (role != nullptr && content != nullptr && content[0] != '\0') {
+        if (strcmp(role, "assistant") == 0) {
+            NurseUiSetState(NURSE_UI_SPEAKING);
+            NurseUiSetTip("Care advice");
+        } else if (strcmp(role, "user") == 0) {
+            NurseUiSetState(NURSE_UI_LISTENING);
+            NurseUiSetTip("Voice command");
+        }
+    }
     if (chat_message_label_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG, "SetChatMessage('%s', '%s') failed: chat_message_label_ is nullptr (SetupUI() was called but label not created)", role, content);
@@ -1071,82 +1083,71 @@ void LcdDisplay::ClearChatMessages() {
 }
 #endif
 
-void LcdDisplay::SetEmotion(const char* emotion) {
+void LcdDisplay::SetStatus(const char* status) {
     if (!setup_ui_called_) {
-        ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
-    }
-    if (emoji_image_ == nullptr) {
-        if (setup_ui_called_) {
-            ESP_LOGW(TAG, "SetEmotion('%s') failed: emoji_image_ is nullptr (SetupUI() was called but emoji image not created)", emotion);
-        }
-        return;
-    }
-
-    auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
-    auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
-    if (image == nullptr) {
-        const char* utf8 = font_awesome_get_utf8(emotion);
-        if (utf8 != nullptr && emoji_label_ != nullptr) {
-            DisplayLockGuard lock(this);
-            if (gif_controller_) {
-                gif_controller_->Stop();
-                gif_controller_.reset();
-            }
-            lv_label_set_text(emoji_label_, utf8);
-            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-        }
-        return;
+        ESP_LOGW(TAG, "SetStatus('%s') called before SetupUI()", status ? status : "");
     }
 
     DisplayLockGuard lock(this);
-    // Stop any running GIF animation in the same lock scope as setting new image
-    // to prevent LVGL from accessing freed image data between operations
+
+    if (status_label_ != nullptr && status != nullptr) {
+        lv_label_set_text(status_label_, status);
+    }
+
+    if (status == nullptr) {
+        return;
+    }
+
+    if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        NurseUiSetState(NURSE_UI_LISTENING);
+        NurseUiSetTip("I am listening");
+    } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+        NurseUiSetState(NURSE_UI_SPEAKING);
+        NurseUiSetTip("Care advice is speaking");
+    } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
+        NurseUiSetState(NURSE_UI_IDLE);
+        NurseUiSetTip("Smart Care Lamp");
+    } else if (strcmp(status, Lang::Strings::ERROR) == 0) {
+        NurseUiSetState(NURSE_UI_ALERT);
+        NurseUiSetTip("Please check device");
+    }
+}
+
+void LcdDisplay::SetEmotion(const char* emotion) {
+    if (!setup_ui_called_) {
+        ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI()", emotion ? emotion : "");
+    }
+
+    DisplayLockGuard lock(this);
+
     if (gif_controller_) {
         gif_controller_->Stop();
         gif_controller_.reset();
     }
-    if (image->IsGif()) {
-        // Create new GIF controller
-        gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
-        
-        if (gif_controller_->IsLoaded()) {
-            // Set up frame update callback
-            gif_controller_->SetFrameCallback([this]() {
-                lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
-            });
-            
-            // Set initial frame and start animation
-            lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
-            gif_controller_->Start();
-            
-            // Show GIF, hide others
-            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
-            gif_controller_.reset();
-        }
-    } else {
-        lv_image_set_src(emoji_image_, image->image_dsc());
+
+    if (emoji_label_ != nullptr) {
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
     }
 
-#if CONFIG_USE_WECHAT_MESSAGE_STYLE
-    // In WeChat message style, if emotion is neutral, don't display it
-    uint32_t child_count = lv_obj_get_child_cnt(content_);
-    if (strcmp(emotion, "neutral") == 0 && child_count > 0) {
-        // Stop GIF animation if running
-        if (gif_controller_) {
-            gif_controller_->Stop();
-            gif_controller_.reset();
-        }
-        
+    if (emoji_image_ != nullptr) {
         lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
     }
-#endif
+
+    if (emoji_box_ != nullptr) {
+        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (emotion == nullptr) {
+        return;
+    }
+
+    if (strcmp(emotion, "sad") == 0 || strcmp(emotion, "angry") == 0) {
+        NurseUiSetState(NURSE_UI_ALERT);
+        NurseUiSetTip("Need attention");
+    } else {
+        NurseUiSetState(NURSE_UI_IDLE);
+        NurseUiSetTip("Smart Care Lamp");
+    }
 }
 
 void LcdDisplay::SetTheme(Theme* theme) {
