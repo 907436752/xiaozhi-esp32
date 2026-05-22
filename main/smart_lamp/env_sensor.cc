@@ -374,17 +374,16 @@ static void maybe_send_real_weather()
         return;
     }
 
-    char title[32];
+    char title[64];
     char humidity_buf[16];
     char wind_buf[16];
     char rain_buf[16];
 
-    snprintf(title, sizeof(title), "W|0|%s|%d|%d|%d|%s",
-             weather.condition,
-             weather.now_temp_c,
-             weather.low_temp_c,
-             weather.high_temp_c,
-             WEATHER_CITY_NAME);
+    snprintf(title, sizeof(title), "W|0|%s|%d|%d|%d",
+            weather.condition,
+            weather.now_temp_c,
+            weather.low_temp_c,
+            weather.high_temp_c);
     snprintf(humidity_buf, sizeof(humidity_buf), "%d%%", weather.humidity_percent);
     snprintf(wind_buf, sizeof(wind_buf), "%d km/h", weather.wind_speed_kmh);
     snprintf(rain_buf, sizeof(rain_buf), "%d%%", weather.rain_probability_percent);
