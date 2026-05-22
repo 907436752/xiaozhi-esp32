@@ -42,6 +42,11 @@ static void nurse_set_frame(uint8_t frame)
     }
 
     lv_image_set_src(s_img, k_nurse_frames[frame]);
+
+    // 固定缩放和对齐。这里不能跟着嘴型帧做呼吸缩放，否则说话时会忽大忽小。
+    lv_image_set_scale(s_img, 256);
+    lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 2);
+
     s_last_frame = frame;
 }
 
@@ -129,16 +134,12 @@ static void nurse_timer_cb(lv_timer_t* timer)
 
     s_tick++;
 
-    // 说话时只切换嘴型，不再缩放整张图片，避免人物忽大忽小。
+    // 小护士图像本体不做任何缩放动画，只切换嘴型帧。
+    // 否则状态在 SPEAKING/IDLE 之间快速跳变时，会看到人物尺寸抖动。
     if (s_state == NURSE_UI_SPEAKING) {
         nurse_set_frame((s_tick % 2) ? 1 : 0);
-        lv_image_set_scale(s_img, 256);
     } else {
         nurse_set_frame(0);
-
-        int phase = s_tick % 30;
-        int zoom = 256 + (phase < 15 ? phase / 5 : (30 - phase) / 5);
-        lv_image_set_scale(s_img, zoom);
     }
 
     if (s_glow) {
