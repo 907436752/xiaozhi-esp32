@@ -1,22 +1,28 @@
 #include "env_sensor.h"
 #include "lamp_bridge.h"
 
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "esp_sntp.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp_rom_sys.h"
-#include <math.h>
-#include <stdio.h>
 extern "C" {
 #include "bme68x.h"
 }
 
 #define TAG "BME690_ENV"
+
+#define CLOCK_SYNC_SEND_INTERVAL_MS     (60 * 1000)
+#define CLOCK_SYNC_RETRY_INTERVAL_MS    (10 * 1000)
 
 static struct bme68x_dev s_bme_dev = {};
 static env_sensor_data_t s_latest = {};
@@ -24,6 +30,15 @@ static bool s_has_latest = false;
 
 static env_care_state_t s_latest_care = {};
 static bool s_has_latest_care = false;
+
+static bool s_sntp_started = false;
+static TickType_t s_last_clock_sync_tick = 0;
+static TickType_t s_last_clock_sync_attempt_tick = 0;
+
+static uint32_t elapsed_ms(TickType_t now, TickType_t then)
+{
+    return (uint32_t)((now - then) * portTICK_PERIOD_MS);
+}
 
 static const char* env_level_to_str(env_level_t level)
 {
@@ -33,6 +48,101 @@ static const char* env_level_to_str(env_level_t level)
         case ENV_LEVEL_WARNING: return "warning";
         default: return "unknown";
     }
+}
+
+static void ensure_sntp_started()
+{
+    if (s_sntp_started) {
+        return;
+    }
+
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "ntp.aliyun.com");
+    esp_sntp_setservername(1, "pool.ntp.org");
+    esp_sntp_init();
+
+    s_sntp_started = true;
+    ESP_LOGI(TAG, "SNTP started for S3 clock sync");
+}
+
+static bool get_local_clock_text(char* time_buf,
+                                 size_t time_size,
+                                 char* date_buf,
+                                 size_t date_size)
+{
+    time_t now = 0;
+    struct tm timeinfo = {};
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    int year = timeinfo.tm_year + 1900;
+    if (year < 2024) {
+        return false;
+    }
+
+    snprintf(time_buf,
+             time_size,
+             "%02d:%02d:%02d",
+             timeinfo.tm_hour,
+             timeinfo.tm_min,
+             timeinfo.tm_sec);
+
+    snprintf(date_buf,
+             date_size,
+             "%04d-%02d-%02d",
+             year,
+             timeinfo.tm_mon + 1,
+             timeinfo.tm_mday);
+
+    return true;
+}
+
+static void maybe_send_clock_sync()
+{
+    SmartLampBridge& bridge = SmartLampBridge::GetInstance();
+
+    if (!bridge.IsOnline(10000)) {
+        return;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+
+    if (s_last_clock_sync_tick != 0 &&
+        elapsed_ms(now, s_last_clock_sync_tick) < CLOCK_SYNC_SEND_INTERVAL_MS) {
+        return;
+    }
+
+    if (s_last_clock_sync_attempt_tick != 0 &&
+        elapsed_ms(now, s_last_clock_sync_attempt_tick) < CLOCK_SYNC_RETRY_INTERVAL_MS) {
+        return;
+    }
+
+    s_last_clock_sync_attempt_tick = now;
+    ensure_sntp_started();
+
+    char time_buf[16];
+    char date_buf[24];
+
+    if (!get_local_clock_text(time_buf, sizeof(time_buf), date_buf, sizeof(date_buf))) {
+        ESP_LOGW(TAG, "System time is not synced yet, skip S3 clock sync");
+        return;
+    }
+
+    bridge.SendLargeDisplay(
+        LARGE_PAGE_CLOCK,
+        0,
+        time_buf,
+        date_buf,
+        "",
+        ""
+    );
+
+    s_last_clock_sync_tick = now;
+    ESP_LOGI(TAG, "Clock sync sent to S3: %s %s", date_buf, time_buf);
 }
 
 static temp_state_t classify_temp(float t)
@@ -229,7 +339,9 @@ static env_care_state_t evaluate_env_care(float temp_c, float humidity)
 
 static void send_env_to_large_clock(const env_sensor_data_t& data)
 {
-    if (!SmartLampBridge::GetInstance().IsOnline(10000)) {
+    SmartLampBridge& bridge = SmartLampBridge::GetInstance();
+
+    if (!bridge.IsOnline(10000)) {
         ESP_LOGW(TAG, "Skip large display env update: S3 bridge is not online yet");
         return;
     }
@@ -240,11 +352,11 @@ static void send_env_to_large_clock(const env_sensor_data_t& data)
     snprintf(temp_buf, sizeof(temp_buf), "%.1f C", (double)data.temperature_c);
     snprintf(humid_buf, sizeof(humid_buf), "%.0f %%", (double)data.humidity_percent);
 
-    SmartLampBridge::GetInstance().SendLargeDisplay(
+    bridge.SendLargeDisplay(
         LARGE_PAGE_CLOCK,
         0,
         "",
-        "Smart Care Lamp",
+        "",
         temp_buf,
         humid_buf
     );
@@ -350,11 +462,6 @@ bool Bme690EnvSensor::ReadOnce(env_sensor_data_t* out)
     conf.os_pres = BME68X_OS_4X;
     conf.os_temp = BME68X_OS_8X;
 
-    struct bme68x_heatr_conf heatr_conf = {};
-    heatr_conf.enable = BME68X_ENABLE;
-    heatr_conf.heatr_temp = 0;
-    heatr_conf.heatr_dur = 0;
-
     int8_t rslt = bme68x_set_op_mode(BME68X_FORCED_MODE, &s_bme_dev);
     if (rslt != BME68X_OK) {
         ESP_LOGW(TAG, "bme68x_set_op_mode failed: %d", rslt);
@@ -454,6 +561,7 @@ void Bme690EnvSensor::SensorTask(void* arg)
             }
 
             send_env_to_large_clock(data);
+            maybe_send_clock_sync();
 
             if (has_care) {
                 ESP_LOGI(TAG,
