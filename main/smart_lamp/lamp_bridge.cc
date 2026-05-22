@@ -1,4 +1,5 @@
 #include "lamp_bridge.h"
+#include "care_backend_client.h"
 
 #include <string.h>
 
@@ -385,6 +386,7 @@ void SmartLampBridge::Start()
 
     xTaskCreate(RecvTask, "lamp_recv", 4096, this, 4, nullptr);
     xTaskCreate(CommandTask, "lamp_cmd", 4096, this, 3, nullptr);
+    CareBackendClient::Start();
 
     ESP_LOGI(TAG, "Smart lamp ESP-NOW bridge started on channel %d",
              SMART_LAMP_ESPNOW_CHANNEL);
