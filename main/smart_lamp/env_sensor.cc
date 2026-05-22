@@ -1,4 +1,5 @@
 #include "env_sensor.h"
+#include "lamp_bridge.h"
 
 #include <string.h>
 
@@ -226,6 +227,24 @@ static env_care_state_t evaluate_env_care(float temp_c, float humidity)
     return out;
 }
 
+static void send_env_to_large_clock(const env_sensor_data_t& data)
+{
+    char temp_buf[16];
+    char humid_buf[16];
+
+    snprintf(temp_buf, sizeof(temp_buf), "%.1f C", (double)data.temperature_c);
+    snprintf(humid_buf, sizeof(humid_buf), "%.0f %%", (double)data.humidity_percent);
+
+    SmartLampBridge::GetInstance().SendLargeDisplay(
+        LARGE_PAGE_CLOCK,
+        0,
+        "",
+        "Smart Care Lamp",
+        temp_buf,
+        humid_buf
+    );
+}
+
 Bme690EnvSensor::Bme690EnvSensor(i2c_master_bus_handle_t bus, uint8_t addr)
     : bus_(bus), addr_(addr)
 {
@@ -345,7 +364,6 @@ bool Bme690EnvSensor::ReadOnce(env_sensor_data_t* out)
     uint8_t n_fields = 0;
 
     rslt = bme68x_get_data(BME68X_FORCED_MODE, &data, &n_fields, &s_bme_dev);
-    //ESP_LOGI(TAG, "bme status=0x%02X n_fields=%u", data.status, n_fields);
     if (rslt != BME68X_OK || n_fields == 0) {
         ESP_LOGW(TAG, "bme68x_get_data failed: rslt=%d n_fields=%u", rslt, n_fields);
         return false;
@@ -429,6 +447,8 @@ void Bme690EnvSensor::SensorTask(void* arg)
                         data.gas_resistance_ohm,
                         data.gas_valid ? 1 : 0);
             }
+
+            send_env_to_large_clock(data);
 
             if (has_care) {
                 ESP_LOGI(TAG,
