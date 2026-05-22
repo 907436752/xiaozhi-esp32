@@ -8,9 +8,11 @@
 #include <time.h>
 
 #include "esp_err.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_sntp.h"
+#include "esp_crt_bundle.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,6 +25,12 @@ extern "C" {
 
 #define CLOCK_SYNC_SEND_INTERVAL_MS     (60 * 1000)
 #define CLOCK_SYNC_RETRY_INTERVAL_MS    (10 * 1000)
+#define WEATHER_SEND_INTERVAL_MS        (30 * 60 * 1000)
+#define WEATHER_RETRY_INTERVAL_MS       (60 * 1000)
+
+// Qinhuangdao approximate city center. Open-Meteo does not require an API key.
+#define WEATHER_API_URL "https://api.open-meteo.com/v1/forecast?latitude=39.9354&longitude=119.6005&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,precipitation,rain,snowfall&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FShanghai&forecast_days=1"
+#define WEATHER_CITY_NAME "Qinhuangdao"
 
 static struct bme68x_dev s_bme_dev = {};
 static env_sensor_data_t s_latest = {};
@@ -34,6 +42,24 @@ static bool s_has_latest_care = false;
 static bool s_sntp_started = false;
 static TickType_t s_last_clock_sync_tick = 0;
 static TickType_t s_last_clock_sync_attempt_tick = 0;
+static TickType_t s_last_weather_send_tick = 0;
+static TickType_t s_last_weather_attempt_tick = 0;
+
+struct weather_http_buffer_t {
+    char *data;
+    size_t capacity;
+    size_t length;
+};
+
+struct weather_data_t {
+    char condition[20];
+    int now_temp_c;
+    int low_temp_c;
+    int high_temp_c;
+    int humidity_percent;
+    int wind_speed_kmh;
+    int rain_probability_percent;
+};
 
 static uint32_t elapsed_ms(TickType_t now, TickType_t then)
 {
@@ -142,6 +168,246 @@ static void maybe_send_clock_sync()
 
     s_last_clock_sync_tick = now;
     ESP_LOGI(TAG, "Clock sync sent to S3: %s %s", date_buf, time_buf);
+}
+
+static esp_err_t weather_http_event_handler(esp_http_client_event_t *evt)
+{
+    weather_http_buffer_t *buf = static_cast<weather_http_buffer_t *>(evt->user_data);
+
+    if (evt->event_id == HTTP_EVENT_ON_DATA && buf != nullptr && evt->data != nullptr) {
+        if (buf->length + evt->data_len >= buf->capacity) {
+            ESP_LOGW(TAG, "Weather response buffer overflow, drop extra data");
+            return ESP_OK;
+        }
+
+        memcpy(buf->data + buf->length, evt->data, evt->data_len);
+        buf->length += evt->data_len;
+        buf->data[buf->length] = '\0';
+    }
+
+    return ESP_OK;
+}
+
+static bool json_find_number_after(const char *json, const char *key, double *out)
+{
+    if (json == nullptr || key == nullptr || out == nullptr) {
+        return false;
+    }
+
+    const char *p = strstr(json, key);
+    if (p == nullptr) {
+        return false;
+    }
+
+    p = strchr(p, ':');
+    if (p == nullptr) {
+        return false;
+    }
+
+    ++p;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == '[') {
+        ++p;
+    }
+
+    char *end = nullptr;
+    double value = strtod(p, &end);
+    if (end == p) {
+        return false;
+    }
+
+    *out = value;
+    return true;
+}
+
+static int round_to_int(double value)
+{
+    if (value >= 0.0) {
+        return (int)(value + 0.5);
+    }
+    return (int)(value - 0.5);
+}
+
+static const char *weather_code_to_condition(int code)
+{
+    if (code == 0) {
+        return "Sunny";
+    }
+    if (code == 1 || code == 2) {
+        return "Partly";
+    }
+    if (code == 3) {
+        return "Cloudy";
+    }
+    if (code == 45 || code == 48) {
+        return "Fog";
+    }
+    if ((code >= 51 && code <= 67) ||
+        (code >= 80 && code <= 82)) {
+        return "Rain";
+    }
+    if ((code >= 71 && code <= 77) ||
+        (code >= 85 && code <= 86)) {
+        return "Snow";
+    }
+    if (code >= 95 && code <= 99) {
+        return "Thunder";
+    }
+    return "Cloudy";
+}
+
+static bool parse_weather_json(const char *json, weather_data_t *out)
+{
+    if (json == nullptr || out == nullptr) {
+        return false;
+    }
+
+    double now_temp = 0.0;
+    double humidity = 0.0;
+    double weather_code = 0.0;
+    double wind_speed = 0.0;
+    double high_temp = 0.0;
+    double low_temp = 0.0;
+    double rain_probability = 0.0;
+
+    if (!json_find_number_after(json, "\"temperature_2m\"", &now_temp) ||
+        !json_find_number_after(json, "\"relative_humidity_2m\"", &humidity) ||
+        !json_find_number_after(json, "\"weather_code\"", &weather_code) ||
+        !json_find_number_after(json, "\"wind_speed_10m\"", &wind_speed) ||
+        !json_find_number_after(json, "\"temperature_2m_max\"", &high_temp) ||
+        !json_find_number_after(json, "\"temperature_2m_min\"", &low_temp)) {
+        return false;
+    }
+
+    if (!json_find_number_after(json, "\"precipitation_probability_max\"", &rain_probability)) {
+        rain_probability = 0.0;
+    }
+
+    snprintf(out->condition, sizeof(out->condition), "%s",
+             weather_code_to_condition(round_to_int(weather_code)));
+    out->now_temp_c = round_to_int(now_temp);
+    out->low_temp_c = round_to_int(low_temp);
+    out->high_temp_c = round_to_int(high_temp);
+    out->humidity_percent = round_to_int(humidity);
+    out->wind_speed_kmh = round_to_int(wind_speed);
+    out->rain_probability_percent = round_to_int(rain_probability);
+
+    return true;
+}
+
+static bool fetch_weather_from_open_meteo(weather_data_t *out)
+{
+    if (out == nullptr) {
+        return false;
+    }
+
+    char *response = static_cast<char *>(calloc(1, 4096));
+    if (response == nullptr) {
+        ESP_LOGE(TAG, "No memory for weather response");
+        return false;
+    }
+
+    weather_http_buffer_t buffer = {
+        .data = response,
+        .capacity = 4096,
+        .length = 0,
+    };
+
+    esp_http_client_config_t config = {};
+    config.url = WEATHER_API_URL;
+    config.method = HTTP_METHOD_GET;
+    config.timeout_ms = 8000;
+    config.event_handler = weather_http_event_handler;
+    config.user_data = &buffer;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) {
+        free(response);
+        ESP_LOGE(TAG, "esp_http_client_init failed");
+        return false;
+    }
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status_code = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status_code != 200) {
+        ESP_LOGW(TAG, "Weather HTTP failed: err=%s status=%d len=%u",
+                 esp_err_to_name(err), status_code, (unsigned)buffer.length);
+        free(response);
+        return false;
+    }
+
+    bool ok = parse_weather_json(response, out);
+    if (!ok) {
+        ESP_LOGW(TAG, "Weather JSON parse failed, len=%u", (unsigned)buffer.length);
+    }
+
+    free(response);
+    return ok;
+}
+
+static void maybe_send_real_weather()
+{
+    SmartLampBridge& bridge = SmartLampBridge::GetInstance();
+
+    if (!bridge.IsOnline(10000)) {
+        return;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+    if (s_last_weather_send_tick != 0 &&
+        elapsed_ms(now, s_last_weather_send_tick) < WEATHER_SEND_INTERVAL_MS) {
+        return;
+    }
+
+    if (s_last_weather_attempt_tick != 0 &&
+        elapsed_ms(now, s_last_weather_attempt_tick) < WEATHER_RETRY_INTERVAL_MS) {
+        return;
+    }
+    s_last_weather_attempt_tick = now;
+
+    ensure_sntp_started();
+
+    weather_data_t weather = {};
+    if (!fetch_weather_from_open_meteo(&weather)) {
+        return;
+    }
+
+    char title[32];
+    char humidity_buf[16];
+    char wind_buf[16];
+    char rain_buf[16];
+
+    snprintf(title, sizeof(title), "W|0|%s|%d|%d|%d|%s",
+             weather.condition,
+             weather.now_temp_c,
+             weather.low_temp_c,
+             weather.high_temp_c,
+             WEATHER_CITY_NAME);
+    snprintf(humidity_buf, sizeof(humidity_buf), "%d%%", weather.humidity_percent);
+    snprintf(wind_buf, sizeof(wind_buf), "%d km/h", weather.wind_speed_kmh);
+    snprintf(rain_buf, sizeof(rain_buf), "%d%%", weather.rain_probability_percent);
+
+    bridge.SendLargeDisplay(
+        LARGE_PAGE_WEATHER,
+        0,
+        title,
+        humidity_buf,
+        wind_buf,
+        rain_buf
+    );
+
+    s_last_weather_send_tick = now;
+    ESP_LOGI(TAG,
+             "Weather sent to S3: %s temp=%d low=%d high=%d hum=%d wind=%d rain=%d",
+             weather.condition,
+             weather.now_temp_c,
+             weather.low_temp_c,
+             weather.high_temp_c,
+             weather.humidity_percent,
+             weather.wind_speed_kmh,
+             weather.rain_probability_percent);
 }
 
 static temp_state_t classify_temp(float t)
@@ -567,6 +833,7 @@ void Bme690EnvSensor::SensorTask(void* arg)
 
             send_env_to_large_clock(data);
             maybe_send_clock_sync();
+            maybe_send_real_weather();
 
             if (has_care) {
                 ESP_LOGI(TAG,
