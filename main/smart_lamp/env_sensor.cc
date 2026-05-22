@@ -73,6 +73,11 @@ static bool get_local_clock_text(char* time_buf,
                                  char* date_buf,
                                  size_t date_size)
 {
+    if (time_buf == nullptr || date_buf == nullptr ||
+        time_size < 9 || date_size < 11) {
+        return false;
+    }
+
     time_t now = 0;
     struct tm timeinfo = {};
 
@@ -84,19 +89,13 @@ static bool get_local_clock_text(char* time_buf,
         return false;
     }
 
-    snprintf(time_buf,
-             time_size,
-             "%02d:%02d:%02d",
-             timeinfo.tm_hour,
-             timeinfo.tm_min,
-             timeinfo.tm_sec);
+    if (strftime(time_buf, time_size, "%H:%M:%S", &timeinfo) == 0) {
+        return false;
+    }
 
-    snprintf(date_buf,
-             date_size,
-             "%04d-%02d-%02d",
-             year,
-             timeinfo.tm_mon + 1,
-             timeinfo.tm_mday);
+    if (strftime(date_buf, date_size, "%Y-%m-%d", &timeinfo) == 0) {
+        return false;
+    }
 
     return true;
 }
