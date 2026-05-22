@@ -345,8 +345,14 @@ static void send_env_to_large_clock(const env_sensor_data_t& data)
         return;
     }
 
+    ensure_sntp_started();
+
+    char time_buf[16] = "";
+    char date_buf[24] = "";
     char temp_buf[16];
     char humid_buf[16];
+
+    (void)get_local_clock_text(time_buf, sizeof(time_buf), date_buf, sizeof(date_buf));
 
     snprintf(temp_buf, sizeof(temp_buf), "%.1f C", (double)data.temperature_c);
     snprintf(humid_buf, sizeof(humid_buf), "%.0f %%", (double)data.humidity_percent);
@@ -354,8 +360,8 @@ static void send_env_to_large_clock(const env_sensor_data_t& data)
     bridge.SendLargeDisplay(
         LARGE_PAGE_CLOCK,
         0,
-        "",
-        "",
+        time_buf,
+        date_buf,
         temp_buf,
         humid_buf
     );
