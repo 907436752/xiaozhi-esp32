@@ -2,7 +2,13 @@
 
 #include <string.h>
 
-LV_IMAGE_DECLARE(nurse_sprite);
+LV_IMAGE_DECLARE(nurse_sprite_closed);
+LV_IMAGE_DECLARE(nurse_sprite_mouth_open);
+
+static const void* k_nurse_frames[] = {
+    &nurse_sprite_closed,
+    &nurse_sprite_mouth_open,
+};
 
 static lv_obj_t* s_root = nullptr;
 static lv_obj_t* s_img = nullptr;
@@ -14,11 +20,30 @@ static lv_timer_t* s_timer = nullptr;
 
 static nurse_ui_state_t s_state = NURSE_UI_IDLE;
 static uint32_t s_tick = 0;
+static uint8_t s_last_frame = 0xFF;
 
 static lv_color_t color_idle   = lv_color_hex(0x6EDCFF);
 static lv_color_t color_listen = lv_color_hex(0x5C8DFF);
 static lv_color_t color_speak  = lv_color_hex(0x7CFFCB);
 static lv_color_t color_alert  = lv_color_hex(0xFF4B4B);
+
+static void nurse_set_frame(uint8_t frame)
+{
+    if (!s_img) {
+        return;
+    }
+
+    if (frame > 1) {
+        frame = 0;
+    }
+
+    if (s_last_frame == frame) {
+        return;
+    }
+
+    lv_image_set_src(s_img, k_nurse_frames[frame]);
+    s_last_frame = frame;
+}
 
 static lv_obj_t* make_dot(lv_obj_t* parent)
 {
@@ -106,9 +131,13 @@ static void nurse_timer_cb(lv_timer_t* timer)
 
     // 只做轻微缩放/透明度变化，不再移动整个大对象，避免 SPI 屏闪白。
     if (s_state == NURSE_UI_SPEAKING) {
-        int zoom = (s_tick % 2) ? 263 : 256;
+        nurse_set_frame((s_tick % 2) ? 1 : 0);
+
+        int zoom = (s_tick % 2) ? 260 : 256;
         lv_image_set_scale(s_img, zoom);
     } else {
+        nurse_set_frame(0);
+
         int phase = s_tick % 30;
         int zoom = 256 + (phase < 15 ? phase / 5 : (30 - phase) / 5);
         lv_image_set_scale(s_img, zoom);
@@ -170,9 +199,9 @@ void NurseUiCreate(lv_obj_t* parent)
     lv_obj_clear_flag(s_glow, LV_OBJ_FLAG_SCROLLABLE);
 
     s_img = lv_image_create(s_root);
-    lv_image_set_src(s_img, &nurse_sprite);
     lv_image_set_scale(s_img, 256);
     lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 2);
+    nurse_set_frame(0);
 
     s_status = lv_label_create(s_root);
     lv_obj_set_width(s_status, 220);
@@ -209,6 +238,10 @@ void NurseUiSetState(nurse_ui_state_t state)
 
     s_state = state;
     update_state_style();
+
+    if (s_state != NURSE_UI_SPEAKING) {
+        nurse_set_frame(0);
+    }
 }
 
 void NurseUiSetTip(const char* text)
