@@ -229,6 +229,11 @@ static env_care_state_t evaluate_env_care(float temp_c, float humidity)
 
 static void send_env_to_large_clock(const env_sensor_data_t& data)
 {
+    if (!SmartLampBridge::GetInstance().IsOnline(10000)) {
+        ESP_LOGW(TAG, "Skip large display env update: S3 bridge is not online yet");
+        return;
+    }
+
     char temp_buf[16];
     char humid_buf[16];
 
