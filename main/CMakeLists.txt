@@ -41,6 +41,7 @@ set(SOURCES "audio/audio_codec.cc"
             "smart_lamp/env_sensor.cc"
             "smart_lamp/bme68x/bme68x.c"
             "smart_lamp/nurse_ui.cc"
+            "smart_lamp/nurse_sprite.c"
             )
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "smart_lamp" "smart_lamp/bme68x")

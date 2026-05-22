@@ -30,9 +30,9 @@ void LcdDisplay::InitializeLcdThemes() {
 
     // light theme
     auto light_theme = new LvglTheme("light");
-    light_theme->set_background_color(lv_color_hex(0xFFFFFF));
-    light_theme->set_text_color(lv_color_hex(0x000000));
-    light_theme->set_chat_background_color(lv_color_hex(0xE0E0E0));
+    light_theme->set_background_color(lv_color_hex(0x07111F));
+    light_theme->set_text_color(lv_color_hex(0xEAF4FF));
+    light_theme->set_chat_background_color(lv_color_hex(0x07111F));
     light_theme->set_user_bubble_color(lv_color_hex(0x00FF00));
     light_theme->set_assistant_bubble_color(lv_color_hex(0xDDDDDD));
     light_theme->set_system_bubble_color(lv_color_hex(0xFFFFFF));
@@ -73,7 +73,7 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 
     // Load theme from settings
     Settings settings("display", false);
-    std::string theme_name = settings.GetString("theme", "light");
+    std::string theme_name = "light";
     current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
 
     // Create a timer to hide the preview image
@@ -832,10 +832,11 @@ void LcdDisplay::SetupUI() {
 
     /* Bottom layer: emoji_box_ - centered display */
     emoji_box_ = lv_obj_create(screen);
-    lv_obj_set_size(emoji_box_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_size(emoji_box_, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_style_bg_opa(emoji_box_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(emoji_box_, 0, 0);
     lv_obj_set_style_border_width(emoji_box_, 0, 0);
+    lv_obj_clear_flag(emoji_box_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, 0);
 
     emoji_label_ = lv_label_create(emoji_box_);
@@ -1144,10 +1145,9 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     if (strcmp(emotion, "sad") == 0 || strcmp(emotion, "angry") == 0) {
         NurseUiSetState(NURSE_UI_ALERT);
         NurseUiSetTip("Need attention");
-    } else {
-        NurseUiSetState(NURSE_UI_IDLE);
-        NurseUiSetTip("Smart Care Lamp");
     }
+
+// 其他 emotion 先不处理，避免 neutral/happy 把 LISTENING/SPEAKING 状态冲掉。
 }
 
 void LcdDisplay::SetTheme(Theme* theme) {

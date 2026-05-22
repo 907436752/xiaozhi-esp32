@@ -2,131 +2,95 @@
 
 #include <string.h>
 
+LV_IMAGE_DECLARE(nurse_sprite);
+
 static lv_obj_t* s_root = nullptr;
-static lv_obj_t* s_aura = nullptr;
-static lv_obj_t* s_head = nullptr;
-static lv_obj_t* s_body = nullptr;
-static lv_obj_t* s_cap = nullptr;
-static lv_obj_t* s_cross_h = nullptr;
-static lv_obj_t* s_cross_v = nullptr;
-static lv_obj_t* s_eye_l = nullptr;
-static lv_obj_t* s_eye_r = nullptr;
-static lv_obj_t* s_mouth = nullptr;
+static lv_obj_t* s_img = nullptr;
 static lv_obj_t* s_status = nullptr;
 static lv_obj_t* s_tip = nullptr;
 static lv_obj_t* s_dot[3] = {};
+static lv_obj_t* s_glow = nullptr;
 static lv_timer_t* s_timer = nullptr;
 
 static nurse_ui_state_t s_state = NURSE_UI_IDLE;
 static uint32_t s_tick = 0;
 
-static lv_color_t s_accent_idle = lv_color_hex(0x48D7FF);
-static lv_color_t s_accent_listen = lv_color_hex(0x4A8DFF);
-static lv_color_t s_accent_speak = lv_color_hex(0x7CFFCB);
-static lv_color_t s_accent_alert = lv_color_hex(0xFF4B4B);
+static lv_color_t color_idle   = lv_color_hex(0x6EDCFF);
+static lv_color_t color_listen = lv_color_hex(0x5C8DFF);
+static lv_color_t color_speak  = lv_color_hex(0x7CFFCB);
+static lv_color_t color_alert  = lv_color_hex(0xFF4B4B);
 
-static lv_obj_t* make_rect(lv_obj_t* parent, int w, int h, int radius, lv_color_t color)
+static lv_obj_t* make_dot(lv_obj_t* parent)
 {
-    lv_obj_t* obj = lv_obj_create(parent);
-    lv_obj_set_size(obj, w, h);
-    lv_obj_set_style_radius(obj, radius, 0);
-    lv_obj_set_style_bg_color(obj, color, 0);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(obj, 0, 0);
-    lv_obj_set_style_pad_all(obj, 0, 0);
-    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-    return obj;
+    lv_obj_t* dot = lv_obj_create(parent);
+    lv_obj_set_size(dot, 7, 7);
+    lv_obj_set_style_radius(dot, 4, 0);
+    lv_obj_set_style_border_width(dot, 0, 0);
+    lv_obj_set_style_bg_color(dot, color_idle, 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+    return dot;
 }
 
-static lv_obj_t* make_circle(lv_obj_t* parent, int size, lv_color_t color)
+static const char* state_title(nurse_ui_state_t state)
 {
-    return make_rect(parent, size, size, size / 2, color);
-}
-
-static void set_obj_color(lv_obj_t* obj, lv_color_t color)
-{
-    if (obj) {
-        lv_obj_set_style_bg_color(obj, color, 0);
+    switch (state) {
+        case NURSE_UI_IDLE: return "NIGHT CARE";
+        case NURSE_UI_LISTENING: return "LISTENING";
+        case NURSE_UI_THINKING: return "THINKING";
+        case NURSE_UI_SPEAKING: return "SPEAKING";
+        case NURSE_UI_ALERT: return "SOS ALERT";
+        default: return "NIGHT CARE";
     }
 }
 
-static void set_dots_visible(bool visible)
+static lv_color_t state_color(nurse_ui_state_t state)
 {
-    for (int i = 0; i < 3; i++) {
-        if (!s_dot[i]) {
-            continue;
-        }
-
-        if (visible) {
-            lv_obj_remove_flag(s_dot[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_dot[i], LV_OBJ_FLAG_HIDDEN);
-        }
+    switch (state) {
+        case NURSE_UI_IDLE: return color_idle;
+        case NURSE_UI_LISTENING: return color_listen;
+        case NURSE_UI_THINKING: return color_listen;
+        case NURSE_UI_SPEAKING: return color_speak;
+        case NURSE_UI_ALERT: return color_alert;
+        default: return color_idle;
     }
 }
 
-static void apply_state_style()
+static void update_state_style()
 {
     if (!s_root) {
         return;
     }
 
-    lv_color_t accent = s_accent_idle;
-    const char* title = "NIGHT CARE";
-
-    switch (s_state) {
-        case NURSE_UI_IDLE:
-            accent = s_accent_idle;
-            title = "NIGHT CARE";
-            set_dots_visible(false);
-            break;
-
-        case NURSE_UI_LISTENING:
-            accent = s_accent_listen;
-            title = "LISTENING";
-            set_dots_visible(true);
-            break;
-
-        case NURSE_UI_THINKING:
-            accent = s_accent_listen;
-            title = "THINKING";
-            set_dots_visible(true);
-            break;
-
-        case NURSE_UI_SPEAKING:
-            accent = s_accent_speak;
-            title = "SPEAKING";
-            set_dots_visible(false);
-            break;
-
-        case NURSE_UI_ALERT:
-            accent = s_accent_alert;
-            title = "SOS ALERT";
-            set_dots_visible(true);
-            break;
-
-        default:
-            break;
-    }
+    lv_color_t c = state_color(s_state);
 
     if (s_status) {
-        lv_label_set_text(s_status, title);
-        lv_obj_set_style_text_color(s_status, accent, 0);
+        lv_label_set_text(s_status, state_title(s_state));
+        lv_obj_set_style_text_color(s_status, c, 0);
     }
 
-    if (s_aura) {
-        lv_obj_set_style_arc_color(s_aura, accent, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_color(s_aura, lv_color_hex(0x1A2A38), LV_PART_MAIN);
+    if (s_glow) {
+        lv_obj_set_style_border_color(s_glow, c, 0);
+        lv_obj_set_style_shadow_color(s_glow, c, 0);
     }
 
-    set_obj_color(s_cap, lv_color_hex(0xF8FBFF));
-    set_obj_color(s_cross_h, s_state == NURSE_UI_ALERT ? s_accent_alert : lv_color_hex(0xFF5A6A));
-    set_obj_color(s_cross_v, s_state == NURSE_UI_ALERT ? s_accent_alert : lv_color_hex(0xFF5A6A));
-    set_obj_color(s_body, lv_color_hex(0xF6FAFF));
-    set_obj_color(s_mouth, accent);
+    bool show_dots =
+        s_state == NURSE_UI_LISTENING ||
+        s_state == NURSE_UI_THINKING ||
+        s_state == NURSE_UI_ALERT;
 
     for (int i = 0; i < 3; i++) {
-        set_obj_color(s_dot[i], accent);
+        if (!s_dot[i]) {
+            continue;
+        }
+
+        lv_obj_set_style_bg_color(s_dot[i], c, 0);
+
+        if (show_dots) {
+            lv_obj_clear_flag(s_dot[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_dot[i], LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -134,40 +98,39 @@ static void nurse_timer_cb(lv_timer_t* timer)
 {
     (void)timer;
 
-    if (!s_root) {
+    if (!s_root || !s_img) {
         return;
     }
 
     s_tick++;
 
-    int phase = s_tick % 40;
-    int dy = 0;
-
-    if (phase < 20) {
-        dy = -phase / 6;
+    // 只做轻微缩放/透明度变化，不再移动整个大对象，避免 SPI 屏闪白。
+    if (s_state == NURSE_UI_SPEAKING) {
+        int zoom = (s_tick % 2) ? 263 : 256;
+        lv_image_set_scale(s_img, zoom);
     } else {
-        dy = -(40 - phase) / 6;
+        int phase = s_tick % 30;
+        int zoom = 256 + (phase < 15 ? phase / 5 : (30 - phase) / 5);
+        lv_image_set_scale(s_img, zoom);
     }
 
-    lv_obj_align(s_root, LV_ALIGN_CENTER, 0, dy);
+    if (s_glow) {
+        lv_opa_t opa = LV_OPA_30;
 
-    if (s_aura) {
-        int val = 35 + (s_tick * 3) % 50;
-        lv_arc_set_value(s_aura, val);
+        if (s_state == NURSE_UI_ALERT) {
+            opa = (s_tick % 2) ? LV_OPA_70 : LV_OPA_20;
+        } else if (s_state == NURSE_UI_LISTENING || s_state == NURSE_UI_THINKING) {
+            opa = (s_tick % 2) ? LV_OPA_50 : LV_OPA_20;
+        } else if (s_state == NURSE_UI_SPEAKING) {
+            opa = LV_OPA_40;
+        }
+
+        lv_obj_set_style_shadow_opa(s_glow, opa, 0);
     }
 
-    if (s_state == NURSE_UI_SPEAKING && s_mouth) {
-        int w = (s_tick % 2) ? 24 : 14;
-        lv_obj_set_width(s_mouth, w);
-        lv_obj_align(s_mouth, LV_ALIGN_CENTER, 0, 44);
-    }
-
-    if (s_state == NURSE_UI_IDLE && s_mouth) {
-        lv_obj_set_width(s_mouth, 16);
-        lv_obj_align(s_mouth, LV_ALIGN_CENTER, 0, 44);
-    }
-
-    if (s_state == NURSE_UI_LISTENING || s_state == NURSE_UI_THINKING || s_state == NURSE_UI_ALERT) {
+    if (s_state == NURSE_UI_LISTENING ||
+        s_state == NURSE_UI_THINKING ||
+        s_state == NURSE_UI_ALERT) {
         for (int i = 0; i < 3; i++) {
             if (!s_dot[i]) {
                 continue;
@@ -178,13 +141,6 @@ static void nurse_timer_cb(lv_timer_t* timer)
             lv_obj_set_style_bg_opa(s_dot[i], opa, 0);
         }
     }
-
-    if (s_state == NURSE_UI_ALERT && s_aura) {
-        lv_opa_t opa = (s_tick % 2) ? LV_OPA_100 : LV_OPA_40;
-        lv_obj_set_style_arc_opa(s_aura, opa, LV_PART_INDICATOR);
-    } else if (s_aura) {
-        lv_obj_set_style_arc_opa(s_aura, LV_OPA_90, LV_PART_INDICATOR);
-    }
 }
 
 void NurseUiCreate(lv_obj_t* parent)
@@ -194,80 +150,65 @@ void NurseUiCreate(lv_obj_t* parent)
     }
 
     s_root = lv_obj_create(parent);
-    lv_obj_set_size(s_root, 210, 175);
-    lv_obj_align(s_root, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_size(s_root, 240, 200);
+    lv_obj_align(s_root, LV_ALIGN_CENTER, 0, 8);
     lv_obj_set_style_bg_opa(s_root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_root, 0, 0);
     lv_obj_set_style_pad_all(s_root, 0, 0);
-    lv_obj_remove_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_aura = lv_arc_create(s_root);
-    lv_obj_set_size(s_aura, 138, 138);
-    lv_obj_align(s_aura, LV_ALIGN_CENTER, 0, 4);
-    lv_arc_set_range(s_aura, 0, 100);
-    lv_arc_set_value(s_aura, 55);
-    lv_arc_set_rotation(s_aura, 135);
-    lv_arc_set_bg_angles(s_aura, 0, 270);
-    lv_obj_remove_style(s_aura, NULL, LV_PART_KNOB);
-    lv_obj_remove_flag(s_aura, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(s_aura, 5, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_aura, 6, LV_PART_INDICATOR);
+    s_glow = lv_obj_create(s_root);
+    lv_obj_set_size(s_glow, 150, 150);
+    lv_obj_align(s_glow, LV_ALIGN_CENTER, 0, 5);
+    lv_obj_set_style_radius(s_glow, 75, 0);
+    lv_obj_set_style_bg_opa(s_glow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_glow, 1, 0);
+    lv_obj_set_style_border_color(s_glow, color_idle, 0);
+    lv_obj_set_style_shadow_width(s_glow, 24, 0);
+    lv_obj_set_style_shadow_opa(s_glow, LV_OPA_30, 0);
+    lv_obj_set_style_shadow_color(s_glow, color_idle, 0);
+    lv_obj_clear_flag(s_glow, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_body = make_rect(s_root, 74, 58, 18, lv_color_hex(0xF6FAFF));
-    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 50);
-
-    s_head = make_circle(s_root, 64, lv_color_hex(0xFFE5D6));
-    lv_obj_align(s_head, LV_ALIGN_CENTER, 0, 8);
-
-    s_cap = make_rect(s_root, 70, 24, 8, lv_color_hex(0xF8FBFF));
-    lv_obj_align(s_cap, LV_ALIGN_CENTER, 0, -25);
-
-    s_cross_h = make_rect(s_root, 26, 6, 3, lv_color_hex(0xFF5A6A));
-    lv_obj_align(s_cross_h, LV_ALIGN_CENTER, 0, -25);
-
-    s_cross_v = make_rect(s_root, 6, 26, 3, lv_color_hex(0xFF5A6A));
-    lv_obj_align(s_cross_v, LV_ALIGN_CENTER, 0, -25);
-
-    s_eye_l = make_circle(s_root, 7, lv_color_hex(0x1F2B3A));
-    lv_obj_align(s_eye_l, LV_ALIGN_CENTER, -15, 6);
-
-    s_eye_r = make_circle(s_root, 7, lv_color_hex(0x1F2B3A));
-    lv_obj_align(s_eye_r, LV_ALIGN_CENTER, 15, 6);
-
-    s_mouth = make_rect(s_root, 16, 4, 2, s_accent_idle);
-    lv_obj_align(s_mouth, LV_ALIGN_CENTER, 0, 44);
+    s_img = lv_image_create(s_root);
+    lv_image_set_src(s_img, &nurse_sprite);
+    lv_image_set_scale(s_img, 256);
+    lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 2);
 
     s_status = lv_label_create(s_root);
+    lv_obj_set_width(s_status, 220);
     lv_label_set_text(s_status, "NIGHT CARE");
-    lv_obj_set_width(s_status, 200);
     lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_status, s_accent_idle, 0);
+    lv_obj_set_style_text_color(s_status, color_idle, 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 0);
 
     s_tip = lv_label_create(s_root);
+    lv_obj_set_width(s_tip, 220);
     lv_label_set_text(s_tip, "Smart Care Lamp");
-    lv_obj_set_width(s_tip, 200);
     lv_obj_set_style_text_align(s_tip, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_tip, lv_color_hex(0xAAB6C8), 0);
     lv_obj_align(s_tip, LV_ALIGN_BOTTOM_MID, 0, 0);
 
     for (int i = 0; i < 3; i++) {
-        s_dot[i] = make_circle(s_root, 7, s_accent_idle);
-        lv_obj_align(s_dot[i], LV_ALIGN_CENTER, -16 + i * 16, 75);
+        s_dot[i] = make_dot(s_root);
+        lv_obj_align(s_dot[i], LV_ALIGN_BOTTOM_MID, -16 + i * 16, -18);
         lv_obj_add_flag(s_dot[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    apply_state_style();
+    update_state_style();
 
     if (s_timer == nullptr) {
-        s_timer = lv_timer_create(nurse_timer_cb, 120, nullptr);
+        s_timer = lv_timer_create(nurse_timer_cb, 180, nullptr);
     }
 }
-    
+
 void NurseUiSetState(nurse_ui_state_t state)
 {
+    if (s_state == state) {
+        return;
+    }
+
     s_state = state;
-    apply_state_style();
+    update_state_style();
 }
 
 void NurseUiSetTip(const char* text)
