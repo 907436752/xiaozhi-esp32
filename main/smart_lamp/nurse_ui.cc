@@ -129,12 +129,10 @@ static void nurse_timer_cb(lv_timer_t* timer)
 
     s_tick++;
 
-    // 只做轻微缩放/透明度变化，不再移动整个大对象，避免 SPI 屏闪白。
+    // 说话时只切换嘴型，不再缩放整张图片，避免人物忽大忽小。
     if (s_state == NURSE_UI_SPEAKING) {
         nurse_set_frame((s_tick % 2) ? 1 : 0);
-
-        int zoom = (s_tick % 2) ? 260 : 256;
-        lv_image_set_scale(s_img, zoom);
+        lv_image_set_scale(s_img, 256);
     } else {
         nurse_set_frame(0);
 
