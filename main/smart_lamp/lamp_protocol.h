@@ -55,5 +55,6 @@ typedef enum {
     LARGE_PAGE_MESSAGE  = 1,
     LARGE_PAGE_MEDICINE = 2,
     LARGE_PAGE_VOICE    = 3,
-    LARGE_PAGE_ALERT    = 4
+    LARGE_PAGE_ALERT    = 4,
+    LARGE_PAGE_CLOCK    = 5
 } large_page_t;
